@@ -17,12 +17,96 @@ function App() {
 
   useEffect(() => { try { const s = JSON.parse(localStorage.getItem("bgs_v3") || "null"); if (s) dispatch({ type: "HYDRATE", payload: s }); } catch {} }, []);
   useEffect(() => { localStorage.setItem("bgs_v3", JSON.stringify({ user: state.user, family: state.family, familyUsers: state.familyUsers, history: state.history, templates: state.templates, current: state.current })); }, [state.user, state.family, state.familyUsers, state.history, state.templates, state.current]);
-  useEffect(() => { if (!state.family || !sb) return; (async () => { setSyncing(true); const [g, rt, fu] = await Promise.all([dbLoad(state.family), dbLoad(state.family + "_templates"), dbLoad(state.family + "_users")]); if (g) dispatch({ type: "SYNC_HISTORY", history: g }); if (rt) dispatch({ type: "SYNC_TEMPLATES", templates: rt }); if (fu) dispatch({ type: "SET_FAMILY_USERS", familyUsers: fu }); setSyncing(false); })(); }, [state.family, state.screen]);
-  useEffect(() => { if (!state.family || !sb || !Object.keys(state.templates).length) return; dbSave(state.family + "_templates", state.templates).catch(() => {}); }, [state.templates, state.family]);
-  useEffect(() => { if (!state.family || !sb || !Object.keys(state.familyUsers).length) return; dbSave(state.family + "_users", state.familyUsers).catch(() => {}); }, [state.familyUsers, state.family]);
-  useEffect(() => { if (!state.user || state.user.guest || !sb) return; dbSaveUser(state.user.userId, { pin: state.user.pin, displayName: state.user.displayName, families: state.user.families || [], createdAt: state.user.createdAt }).catch(() => {}); }, [state.user]);
+
+  // Sync family data
+  useEffect(() => {
+    if (!state.family || !sb) return;
+    (async () => {
+      setSyncing(true);
+      if (USE_NEW_DB) {
+        const fam = await db2.getFamilyByCode(state.family);
+        if (fam) {
+          const [games, tplRows, members] = await Promise.all([
+            db2.getGames(fam.id),
+            db2.getTemplates(fam.id),
+            db2.getFamilyMembers(fam.id),
+          ]);
+          if (games.length) dispatch({ type: "SYNC_HISTORY", history: games });
+          // Convert template rows to object keyed by template_key
+          const tplObj = {};
+          tplRows.forEach(function(t) {
+            tplObj[t.template_key] = { gameKey: t.game_key, name: t.name, gameName: t.name, emoji: t.emoji, categories: t.categories, scoringType: t.scoring_type, tier: t.tier, maxScore: t.max_score, lowWins: t.low_wins };
+          });
+          if (Object.keys(tplObj).length) dispatch({ type: "SYNC_TEMPLATES", templates: tplObj });
+          // Convert members to familyUsers map
+          const fuMap = {};
+          members.forEach(function(m) {
+            const uname = m.tally_users ? m.tally_users.username : null;
+            if (uname) fuMap[uname] = { displayName: m.display_name };
+          });
+          if (Object.keys(fuMap).length) dispatch({ type: "SET_FAMILY_USERS", familyUsers: fuMap });
+        }
+      } else {
+        const [g, rt, fu] = await Promise.all([dbLoad(state.family), dbLoad(state.family + "_templates"), dbLoad(state.family + "_users")]);
+        if (g) dispatch({ type: "SYNC_HISTORY", history: g });
+        if (rt) dispatch({ type: "SYNC_TEMPLATES", templates: rt });
+        if (fu) dispatch({ type: "SET_FAMILY_USERS", familyUsers: fu });
+      }
+      setSyncing(false);
+    })();
+  }, [state.family, state.screen]);
+
+  // Sync templates
+  useEffect(() => {
+    if (!state.family || !sb || !Object.keys(state.templates).length) return;
+    if (USE_NEW_DB) {
+      (async () => {
+        const fam = await db2.getFamilyByCode(state.family);
+        if (!fam) return;
+        for (const [key, tpl] of Object.entries(state.templates)) {
+          await db2.upsertTemplate(fam.id, key, tpl);
+        }
+      })();
+    } else {
+      dbSave(state.family + "_templates", state.templates).catch(() => {});
+    }
+  }, [state.templates, state.family]);
+
+  // Sync familyUsers
+  useEffect(() => {
+    if (!state.family || !sb || !Object.keys(state.familyUsers).length) return;
+    if (!USE_NEW_DB) {
+      dbSave(state.family + "_users", state.familyUsers).catch(() => {});
+    }
+    // New DB: family members are synced via joinFamily/rename, not bulk
+  }, [state.familyUsers, state.family]);
+
+  // Sync user record
+  useEffect(() => {
+    if (!state.user || state.user.guest || !sb) return;
+    if (USE_NEW_DB) {
+      db2.updateUser(state.user.userId, { pin_hash: state.user.pin, display_name: state.user.displayName }).catch(() => {});
+    } else {
+      dbSaveUser(state.user.userId, { pin: state.user.pin, displayName: state.user.displayName, families: state.user.families || [], createdAt: state.user.createdAt }).catch(() => {});
+    }
+  }, [state.user]);
+
+  // Timer tick
   useEffect(() => { if (!timerRun || timerRem === null) return; const id = setInterval(() => { setTimerRem(prev => { if (prev <= 1) { playSound(timerSound); if (timerRepeat) return timerSet.min * 60 + timerSet.sec; setTimerRun(false); return 0; } return prev - 1; }); }, 1000); return () => clearInterval(id); }, [timerRun, timerRepeat, timerSet, timerSound]);
-  const finishGame = useCallback(async () => { dispatch({ type: "FINISH" }); if (state.family && sb && state.current) { const fin = Object.assign({}, state.current, { finished: true, finishedAt: new Date().toISOString() }); const existing = await dbLoad(state.family) || []; await dbSave(state.family, [fin].concat(existing.filter(g => g.id !== fin.id))); } }, [state.family, state.current]);
+
+  const finishGame = useCallback(async () => {
+    dispatch({ type: "FINISH" });
+    if (state.family && sb && state.current) {
+      const fin = Object.assign({}, state.current, { finished: true, finishedAt: new Date().toISOString() });
+      if (USE_NEW_DB) {
+        const fam = await db2.getFamilyByCode(state.family);
+        if (fam) await db2.saveGame(fam.id, fin);
+      } else {
+        const existing = await dbLoad(state.family) || [];
+        await dbSave(state.family, [fin].concat(existing.filter(g => g.id !== fin.id)));
+      }
+    }
+  }, [state.family, state.current]);
 
   const timerProps = { timerSet, setTimerSet, timerRem, setTimerRem, timerRun, setTimerRun, timerRepeat, setTimerRepeat, timerSound, setTimerSound };
   const screens = { welcome: WelcomeScreen, home: HomeScreen, setup: SetupScreen, game: GameScreen, history: HistoryScreen, historyDetail: HistoryDetail, leaderboard: LeaderboardScreen, family: FamilyScreen, timer: TimerScreen };
@@ -43,8 +127,54 @@ function App() {
 /* ═══ Welcome ═══ */
 function WelcomeScreen({ state, dispatch }) {
   const [mode, setMode] = useState(null); const [uid, setUid] = useState(""); const [pin, setPin] = useState(""); const [err, setErr] = useState(""); const [loading, setLoading] = useState(false);
-  async function create() { if (!uid.trim() || !pin.trim()) { setErr("Username and PIN required"); return; } if (pin.trim().length < 4) { setErr("PIN must be 4+ chars"); return; } setLoading(true); setErr(""); const id = uid.trim().toLowerCase().replace(/\s+/g, ""); if (sb) { const ex = await dbLoadUser(id); if (ex) { setErr("Username taken"); setLoading(false); return; } } const hashedPin = await hashPin(pin.trim()); const user = { userId: id, displayName: id, pin: hashedPin, families: [], createdAt: new Date().toISOString() }; if (sb) await dbSaveUser(id, { pin: hashedPin, displayName: id, families: [], createdAt: user.createdAt }); dispatch({ type: "SET_USER", user }); setLoading(false); }
-  async function login() { if (!uid.trim() || !pin.trim()) { setErr("Both required"); return; } setLoading(true); setErr(""); const id = uid.trim().toLowerCase().replace(/\s+/g, ""); if (!sb) { setErr("Supabase required"); setLoading(false); return; } const data = await dbLoadUser(id); if (!data) { setErr("Not found"); setLoading(false); return; } const hashedInput = await hashPin(pin.trim()); const match = isHashed(data.pin) ? (hashedInput === data.pin) : (pin.trim() === data.pin); if (!match) { setErr("Wrong PIN"); setLoading(false); return; } if (!isHashed(data.pin)) { await dbSaveUser(id, Object.assign({}, data, { pin: hashedInput })); data.pin = hashedInput; } const user = { userId: id, displayName: data.displayName || id, pin: data.pin, families: data.families || [], createdAt: data.createdAt }; dispatch({ type: "SET_USER", user }); if (user.families.length > 0) dispatch({ type: "JOIN_FAMILY", family: user.families[0] }); setLoading(false); }
+  async function create() {
+    if (!uid.trim() || !pin.trim()) { setErr("Username and PIN required"); return; }
+    if (pin.trim().length < 4) { setErr("PIN must be 4+ chars"); return; }
+    setLoading(true); setErr("");
+    const id = uid.trim().toLowerCase().replace(/\s+/g, "");
+    const hashedPin = await hashPin(pin.trim());
+    if (USE_NEW_DB) {
+      const existing = await db2.getUser(id);
+      if (existing) { setErr("Username taken"); setLoading(false); return; }
+      const created = await db2.createUser(id, hashedPin, id);
+      if (!created) { setErr("Error creating account"); setLoading(false); return; }
+      dispatch({ type: "SET_USER", user: { userId: id, displayName: id, pin: hashedPin, families: [], createdAt: new Date().toISOString() } });
+    } else {
+      if (sb) { const ex = await dbLoadUser(id); if (ex) { setErr("Username taken"); setLoading(false); return; } }
+      const user = { userId: id, displayName: id, pin: hashedPin, families: [], createdAt: new Date().toISOString() };
+      if (sb) await dbSaveUser(id, { pin: hashedPin, displayName: id, families: [], createdAt: user.createdAt });
+      dispatch({ type: "SET_USER", user });
+    }
+    setLoading(false);
+  }
+  async function login() {
+    if (!uid.trim() || !pin.trim()) { setErr("Both required"); return; }
+    setLoading(true); setErr("");
+    const id = uid.trim().toLowerCase().replace(/\s+/g, "");
+    if (!sb) { setErr("Supabase required"); setLoading(false); return; }
+    const hashedInput = await hashPin(pin.trim());
+    if (USE_NEW_DB) {
+      const u = await db2.getUser(id);
+      if (!u) { setErr("Not found"); setLoading(false); return; }
+      if (u.pin_hash !== hashedInput) { setErr("Wrong PIN"); setLoading(false); return; }
+      // Get their families
+      const memberRows = await db2.getUserFamilies(u.id);
+      const fams = memberRows.map(function(m) { return m.tally_families ? m.tally_families.code : null; }).filter(Boolean);
+      const user = { userId: u.username, displayName: u.display_name, pin: u.pin_hash, families: fams, createdAt: u.created_at };
+      dispatch({ type: "SET_USER", user });
+      if (fams.length > 0) dispatch({ type: "JOIN_FAMILY", family: fams[0] });
+    } else {
+      const data = await dbLoadUser(id);
+      if (!data) { setErr("Not found"); setLoading(false); return; }
+      const match = isHashed(data.pin) ? (hashedInput === data.pin) : (pin.trim() === data.pin);
+      if (!match) { setErr("Wrong PIN"); setLoading(false); return; }
+      if (!isHashed(data.pin)) { await dbSaveUser(id, Object.assign({}, data, { pin: hashedInput })); data.pin = hashedInput; }
+      const user = { userId: id, displayName: data.displayName || id, pin: data.pin, families: data.families || [], createdAt: data.createdAt };
+      dispatch({ type: "SET_USER", user });
+      if (user.families.length > 0) dispatch({ type: "JOIN_FAMILY", family: user.families[0] });
+    }
+    setLoading(false);
+  }
   return (<div style={{ padding: "40px 24px", minHeight: "100vh", display: "flex", flexDirection: "column", justifyContent: "center" }}>
     <div style={{ textAlign: "center", marginBottom: 40 }}><div style={{ fontSize: 56, marginBottom: 8 }}>🎲</div><h1 style={{ fontSize: 32, fontFamily: "Georgia,serif", fontWeight: 900 }}>Tally</h1><p style={{ color: C.white, fontSize: 14, marginTop: 8 }}>Track scores, settle debates.</p></div>
     {!mode ? <div style={{ display: "flex", flexDirection: "column", gap: 12 }}><Btn full primary onClick={() => setMode("create")}>Create Account</Btn><Btn full onClick={() => setMode("login")}>I have an account</Btn><div onClick={() => dispatch({ type: "GUEST" })} style={{ textAlign: "center", color: C.white, fontSize: 13, cursor: "pointer", marginTop: 8, textDecoration: "underline" }}>Skip — play as guest</div></div>
@@ -183,7 +313,52 @@ function HistoryScreen({state,dispatch}){const fu=state.familyUsers||{};return(<
 
 function HistoryDetail({state,dispatch}){const fu=state.familyUsers||{};const game=state.history.find(g=>g.id===state.detailId);if(!game)return<div style={{padding:"20px 20px 80px"}}><TopBar title="Game Detail" onBack={()=>dispatch({type:"GO",screen:"history"})}/><p style={{color:C.muted,textAlign:"center",marginTop:60}}>Game not found.</p></div>;const isInd=game.scoringType==="independent";const isTeam=game.teamMode&&game.teams;const sortFn=game.lowWins?(a,b)=>a.t-b.t:(a,b)=>b.t-a.t;const rows=game.players.map(p=>({name:isTeam?(game.teams.find(t=>t.name===p.name)?.members.join(", ")||p.name):rname(p,fu),label:p.name,t:calcTotal(p)})).sort(sortFn);return(<div style={{padding:"20px 20px 80px"}}><TopBar title={`${gameEmoji(game)} ${gameName(game)}`} onBack={()=>dispatch({type:"GO",screen:"history"})}/><p style={{color:C.muted,fontSize:12,marginBottom:16}}>{new Date(game.finishedAt||game.startedAt).toLocaleDateString("en-GB",{dateStyle:"long"})}{game.lowWins&&" · ⬇️ Lowest wins"}</p><div style={{...S.limeCard,padding:16,marginBottom:20}}>{rows.map((r,ri)=><div key={r.label} style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:ri<rows.length-1?"1px solid "+C.ink:"none"}}><div><span style={{fontWeight:700}}>{ri===0?"🏆 ":`${ri+1}. `}{r.label}</span>{isTeam&&<div style={{fontSize:10,color:C.muted}}>{r.name}</div>}</div><span style={{color:C.tomato,fontWeight:900}}>{isInd?`${r.t}/${game.maxScore}`:r.t+" pts"}</span></div>)}</div>{!isInd&&<div style={{...S.card,overflow:"hidden",padding:0,marginBottom:20}}><div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:14}}><thead><tr style={{background:C.ink}}><th style={{textAlign:"left",padding:"10px 12px",color:C.white,fontSize:11}}>CATEGORY</th>{game.players.map(p=><th key={p.name} style={{padding:"10px 8px",color:C.white,fontSize:11,textAlign:"center"}}>{p.name}</th>)}</tr></thead><tbody>{game.categories.map((cat,ci)=><tr key={cat} style={{background:ci%2===0?C.white:C.card}}><td style={{padding:"8px 12px",fontWeight:700}}>{cat}</td>{game.players.map(p=><td key={p.name} style={{textAlign:"center",padding:"8px 4px",fontWeight:700}}>{p.scores[cat]||0}</td>)}</tr>)}<tr style={{background:C.tomato}}><td style={{padding:"10px 12px",fontWeight:900,color:C.white,fontFamily:"Georgia,serif"}}>TOTAL</td>{game.players.map(p=><td key={p.name} style={{textAlign:"center",fontWeight:900,color:C.white,fontSize:18,fontFamily:"Georgia,serif"}}>{calcTotal(p)}</td>)}</tr></tbody></table></div></div>}<Btn full onClick={()=>{if(window.confirm("Delete this game?"))dispatch({type:"DELETE_HISTORY",id:game.id})}} style={{background:"#fde8e8",color:"#c0392b",borderColor:"#c0392b"}}>🗑 Delete Game</Btn></div>);}
 
-function FamilyScreen({state,dispatch}){const fu=state.familyUsers||{};const myDname=state.user&&fu[state.user.userId]?fu[state.user.userId].displayName:(state.user?.displayName||null);const[pw,setPw]=useState("");const[loading,setLoading]=useState(false);const[msg,setMsg]=useState("");const[editName,setEditName]=useState(false);const[newDname,setNewDname]=useState(myDname||"");const[nameErr,setNameErr]=useState("");const[claimTarget,setClaimTarget]=useState(null);const[claimSel,setClaimSel]=useState({});const[showDiag,setShowDiag]=useState(false);const unclaimed={};state.history.forEach(g=>{g.players.forEach(p=>{if(!p.userId){if(!unclaimed[p.name])unclaimed[p.name]={name:p.name,games:[]};unclaimed[p.name].games.push(g)}})});const registeredNames=new Set(Object.values(fu).map(u=>u.displayName));const claimable=Object.values(unclaimed).filter(u=>!registeredNames.has(u.name));const myDupes=[];if(state.user&&!state.user.guest&&myDname)state.history.forEach(g=>{if(g.players.some(p=>p.name===myDname&&!p.userId))myDupes.push(g)});async function fixMyDupes(){const ids=myDupes.map(d=>d.id);const uid=state.user.userId;const newH=state.history.map(g=>{if(!ids.includes(g.id))return g;return{...g,players:g.players.map(p=>p.name===myDname&&!p.userId?{...p,userId:uid}:p)}});dispatch({type:"SYNC_HISTORY",history:newH});if(state.family&&sb)await dbSave(state.family,newH)}const diagPlayers={};state.history.forEach(g=>{if(!g.finished)return;(g.teamMode&&g.teams?g.teams.flatMap(t=>t.members.map(m=>({name:m,userId:null}))):g.players).forEach(p=>{const k=pkey(p);if(!diagPlayers[k])diagPlayers[k]={key:k,names:new Set(),userId:p.userId||null,games:0};diagPlayers[k].names.add(p.name);diagPlayers[k].games+=1})});const nameToKeys={};Object.entries(diagPlayers).forEach(([k,v])=>{v.names.forEach(n=>{const norm=n.trim().toLowerCase();if(!nameToKeys[norm])nameToKeys[norm]=[];if(!nameToKeys[norm].includes(k))nameToKeys[norm].push(k)})});const dupeNames=Object.entries(nameToKeys).filter(([,keys])=>keys.length>1);async function mergeDupe(nameNorm,keys){const primary=keys.find(k=>diagPlayers[k].userId)||keys[0];const others=keys.filter(k=>k!==primary);const newH=state.history.map(g=>({...g,players:g.players.map(p=>{if(others.includes(pkey(p)))return{...p,userId:diagPlayers[primary].userId||undefined};return p})}));dispatch({type:"SYNC_HISTORY",history:newH});if(state.family&&sb)await dbSave(state.family,newH)}async function joinFamily(){if(!pw.trim())return;setLoading(true);setMsg("");const code=pw.trim().toLowerCase().replace(/\s+/g,"-");const games=await dbLoad(code);if(games===null)await dbSave(code,[]);dispatch({type:"JOIN_FAMILY",family:code});const rfu=(await dbLoad(code+"_users"))||{};if(state.user&&!state.user.guest&&!rfu[state.user.userId]){rfu[state.user.userId]={displayName:state.user.displayName||state.user.userId};await dbSave(code+"_users",rfu)}dispatch({type:"SET_FAMILY_USERS",familyUsers:rfu});if(games)dispatch({type:"SYNC_HISTORY",history:games});setMsg(`✅ Joined "${code}"`);setLoading(false);setPw("")}async function doRename(){const n=newDname.trim();if(!n){setNameErr("Required");return}const other=Object.entries(fu).filter(([uid])=>uid!==state.user.userId).map(([,u])=>u.displayName);if(other.includes(n)){setNameErr("Name taken");return}setNameErr("");dispatch({type:"RENAME_USER",userId:state.user.userId,newName:n});if(state.family&&sb){const h=state.history.map(g=>({...g,players:g.players.map(p=>p.userId===state.user.userId?{...p,name:n}:p)}));await dbSave(state.family,h);const rfu=(await dbLoad(state.family+"_users"))||{};rfu[state.user.userId]={displayName:n};await dbSave(state.family+"_users",rfu);await dbSaveUser(state.user.userId,{pin:state.user.pin,displayName:n,families:state.user.families||[],createdAt:state.user.createdAt})}setEditName(false)}function startClaim(c){setClaimTarget(c);const sel={};c.games.forEach(g=>{sel[g.id]=true});setClaimSel(sel)}async function doClaim(){if(!claimTarget||!state.user)return;const ids=Object.keys(claimSel).filter(k=>claimSel[k]).map(Number);const dn=myDname||state.user.userId;dispatch({type:"CLAIM_GAMES",gameIds:ids,oldName:claimTarget.name,userId:state.user.userId,newName:dn});if(state.family&&sb){const h=state.history.map(g=>{if(!ids.includes(g.id))return g;return{...g,players:g.players.map(p=>p.name===claimTarget.name&&!p.userId?{...p,userId:state.user.userId,name:dn}:p)}});await dbSave(state.family,h)}setClaimTarget(null)}return(<div style={{padding:"20px 20px 80px"}}><h2 style={{fontFamily:"Georgia,serif",fontWeight:900,marginBottom:16}}>👨‍👩‍👧 Family</h2>{state.user&&!state.user.guest&&<div style={{...S.card,padding:20,marginBottom:20}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}><div><div style={{fontSize:11,color:C.muted,textTransform:"uppercase",letterSpacing:2}}>Profile</div><div style={{fontSize:20,fontWeight:900,fontFamily:"Georgia,serif",marginTop:4}}>{myDname||state.user.userId}</div><div style={{fontSize:12,color:C.muted}}>@{state.user.userId}</div></div><div style={{fontSize:36}}>👤</div></div>{editName?<div><input style={{...inp,marginBottom:8}} value={newDname} onChange={e=>{setNewDname(e.target.value);setNameErr("")}}/>{nameErr&&<div style={{color:C.tomato,fontSize:12,fontWeight:700,marginBottom:8}}>{nameErr}</div>}<div style={{display:"flex",gap:8}}><Btn onClick={()=>setEditName(false)}>Cancel</Btn><Btn primary onClick={doRename}>Save</Btn></div></div>:<Btn onClick={()=>{setEditName(true);setNewDname(myDname||"")}}>✏️ Change Display Name</Btn>}<div style={{marginTop:12}}><span onClick={()=>{if(window.confirm("Log out?"))dispatch({type:"LOGOUT"})}} style={{color:"#c0392b",fontSize:13,cursor:"pointer",fontWeight:700}}>Log out</span></div></div>}{state.user?.guest&&<div style={{...S.limeCard,padding:20,marginBottom:20,textAlign:"center"}}><div style={{fontSize:32,marginBottom:8}}>👤</div><div style={{fontWeight:700,fontSize:15,marginBottom:4}}>Guest</div><p style={{color:C.muted,fontSize:12,marginBottom:12}}>Create an account to claim games & sync.</p><Btn primary onClick={()=>dispatch({type:"LOGOUT"})}>Create Account</Btn></div>}{state.user&&!state.user.guest&&state.user.families?.length>0&&<div style={{marginBottom:20}}><h3 style={{...secHead,color:C.card}}>Your Families</h3>{state.user.families.map(f=><div key={f} style={{...S.card,padding:"12px 16px",marginBottom:8,display:"flex",alignItems:"center",justifyContent:"space-between",background:f===state.family?C.lime:C.card}}><div onClick={()=>{if(f!==state.family&&!state.current)dispatch({type:"SWITCH_FAMILY",family:f})}} style={{cursor:f!==state.family?"pointer":"default",flex:1}}><span style={{fontWeight:700}}>{f}</span>{f===state.family&&<span style={{fontSize:11,color:C.muted,marginLeft:8}}>· active</span>}</div><span onClick={()=>{if(window.confirm(`Leave "${f}"?`))dispatch({type:"LEAVE_FAMILY",family:f})}} style={{color:"#c0392b",fontSize:12,cursor:"pointer",fontWeight:700}}>Leave</span></div>)}{state.current&&<p style={{color:C.card,fontSize:11}}>Finish current game to switch.</p>}</div>}<div style={{marginBottom:20}}><h3 style={{...secHead,color:C.card}}>Join / Create Family</h3>{!sb&&<div style={{...S.limeCard,padding:14,marginBottom:12,fontSize:13,color:C.muted}}>⚠️ Supabase not configured.</div>}<input style={{...inp,marginBottom:12}} placeholder="Family password" value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==="Enter"&&joinFamily()}/><Btn full primary onClick={joinFamily} disabled={loading||!pw.trim()||!sb}>{loading?"…":"Join / Create →"}</Btn>{msg&&<div style={{...S.card,marginTop:12,padding:14,fontSize:13,color:C.muted}}>{msg}</div>}</div>{state.family&&!state.user?.guest&&claimable.length>0&&<div style={{marginBottom:20}}><h3 style={{...secHead,color:C.card}}>Unclaimed Players</h3><p style={{color:C.card,fontSize:12,marginBottom:12}}>Tap to link games to your account.</p>{claimable.map(c=><div key={c.name} onClick={()=>startClaim(c)} style={{...S.card,padding:"12px 16px",marginBottom:8,cursor:"pointer",display:"flex",justifyContent:"space-between"}}><span style={{fontWeight:700}}>{c.name}</span><span style={{fontSize:12,color:C.muted}}>{c.games.length}G</span></div>)}</div>}{myDupes.length>0&&<div style={{marginBottom:20}}><div style={{...S.card,padding:16,background:"#fff3e0",borderColor:"#f39c12"}}><div style={{fontWeight:900,fontSize:14,marginBottom:6}}>🔧 Your duplicate</div><p style={{color:C.muted,fontSize:12,marginBottom:12}}>{myDupes.length} game{myDupes.length!==1?"s":""} with "{myDname}" not linked.</p><Btn full primary onClick={fixMyDupes}>Merge into my account</Btn></div></div>}{dupeNames.length>0&&<div style={{marginBottom:20}}><div style={{...S.card,padding:16,background:"#fde8e8",borderColor:"#c0392b"}}><div style={{fontWeight:900,fontSize:14,marginBottom:6}}>⚠️ Duplicates</div><p style={{color:C.muted,fontSize:12,marginBottom:12}}>Same name, different identities:</p>{dupeNames.map(([nm,keys])=><div key={nm} style={{background:C.white,border:"2px solid "+C.ink,borderRadius:10,padding:12,marginBottom:10}}><div style={{fontWeight:900,fontSize:15,marginBottom:8}}>"{nm}"</div>{keys.map(k=>{const d=diagPlayers[k];return<div key={k} style={{fontSize:12,color:C.muted,marginBottom:4,paddingLeft:8,borderLeft:"3px solid "+(d.userId?C.tomato:C.muted)}}><span style={{fontWeight:700,color:C.ink}}>{[...d.names].join(", ")}</span> · {d.userId?`@${d.userId}`:"no account"} · {d.games}G</div>})}<button onClick={()=>mergeDupe(nm,keys)} style={{marginTop:8,width:"100%",padding:"10px",fontSize:13,fontWeight:700,borderRadius:8,border:"2px solid "+C.ink,background:C.tomato,color:C.white,cursor:"pointer"}}>🔗 Merge</button></div>)}</div></div>}<div style={{marginBottom:20}}><div onClick={()=>setShowDiag(d=>!d)} style={{color:C.card,fontSize:12,cursor:"pointer",fontWeight:700}}>{showDiag?"▼":"▶"} Debug info</div>{showDiag&&<div style={{...S.card,padding:12,marginTop:8,fontSize:11,maxHeight:300,overflow:"auto"}}>{Object.entries(diagPlayers).map(([k,v])=><div key={k} style={{marginBottom:8,paddingBottom:8,borderBottom:"1px solid "+C.ink+"20"}}><div style={{fontWeight:900}}>{[...v.names].join(", ")}</div><div style={{color:C.muted}}>Key: {k} · userId: {v.userId||"none"} · {v.games}G</div></div>)}</div>}</div>{claimTarget&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:999,padding:20}} onClick={()=>setClaimTarget(null)}><div style={{...S.card,padding:24,maxWidth:380,width:"100%",maxHeight:"80vh",overflow:"auto"}} onClick={e=>e.stopPropagation()}><h3 style={{fontFamily:"Georgia,serif",marginBottom:4,fontSize:18}}>Claim "{claimTarget.name}"?</h3><p style={{color:C.muted,fontSize:12,marginBottom:16}}>Select games to link as "{myDname||state.user?.userId}".</p>{claimTarget.games.map(g=><div key={g.id} onClick={()=>setClaimSel(p=>({...p,[g.id]:!p[g.id]}))} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderBottom:"1px solid "+C.ink+"20",cursor:"pointer"}}><div style={{width:24,height:24,borderRadius:6,border:"2px solid "+C.ink,background:claimSel[g.id]?C.tomato:C.white,display:"flex",alignItems:"center",justifyContent:"center",color:C.white,fontSize:14,fontWeight:700,flexShrink:0}}>{claimSel[g.id]?"✓":""}</div><div style={{flex:1}}><div style={{fontSize:13,fontWeight:700}}>{gameEmoji(g)} {gameName(g)}</div><div style={{fontSize:11,color:C.muted}}>{new Date(g.finishedAt||g.startedAt).toLocaleDateString()}</div></div></div>)}<div style={{display:"flex",gap:10,marginTop:20}}><Btn full onClick={()=>setClaimTarget(null)}>Cancel</Btn><Btn full primary onClick={doClaim} disabled={!Object.values(claimSel).some(v=>v)}>Claim</Btn></div></div></div>}</div>);}
+function FamilyScreen({state,dispatch}){const fu=state.familyUsers||{};const myDname=state.user&&fu[state.user.userId]?fu[state.user.userId].displayName:(state.user?.displayName||null);const[pw,setPw]=useState("");const[loading,setLoading]=useState(false);const[msg,setMsg]=useState("");const[editName,setEditName]=useState(false);const[newDname,setNewDname]=useState(myDname||"");const[nameErr,setNameErr]=useState("");const[claimTarget,setClaimTarget]=useState(null);const[claimSel,setClaimSel]=useState({});const[showDiag,setShowDiag]=useState(false);const unclaimed={};state.history.forEach(g=>{g.players.forEach(p=>{if(!p.userId){if(!unclaimed[p.name])unclaimed[p.name]={name:p.name,games:[]};unclaimed[p.name].games.push(g)}})});const registeredNames=new Set(Object.values(fu).map(u=>u.displayName));const claimable=Object.values(unclaimed).filter(u=>!registeredNames.has(u.name));const myDupes=[];if(state.user&&!state.user.guest&&myDname)state.history.forEach(g=>{if(g.players.some(p=>p.name===myDname&&!p.userId))myDupes.push(g)});  async function fixMyDupes(){const ids=myDupes.map(d=>d.id);const uid=state.user.userId;const newH=state.history.map(g=>{if(!ids.includes(g.id))return g;return{...g,players:g.players.map(p=>p.name===myDname&&!p.userId?{...p,userId:uid}:p)}});dispatch({type:"SYNC_HISTORY",history:newH});if(state.family&&sb){if(USE_NEW_DB){const fam=await db2.getFamilyByCode(state.family);if(fam)await db2.saveAllGames(fam.id,newH.filter(g=>ids.includes(g.id)))}else{await dbSave(state.family,newH)}}}const diagPlayers={};state.history.forEach(g=>{if(!g.finished)return;(g.teamMode&&g.teams?g.teams.flatMap(t=>t.members.map(m=>({name:m,userId:null}))):g.players).forEach(p=>{const k=pkey(p);if(!diagPlayers[k])diagPlayers[k]={key:k,names:new Set(),userId:p.userId||null,games:0};diagPlayers[k].names.add(p.name);diagPlayers[k].games+=1})});const nameToKeys={};Object.entries(diagPlayers).forEach(([k,v])=>{v.names.forEach(n=>{const norm=n.trim().toLowerCase();if(!nameToKeys[norm])nameToKeys[norm]=[];if(!nameToKeys[norm].includes(k))nameToKeys[norm].push(k)})});const dupeNames=Object.entries(nameToKeys).filter(([,keys])=>keys.length>1);  async function mergeDupe(nameNorm,keys){const primary=keys.find(k=>diagPlayers[k].userId)||keys[0];const others=keys.filter(k=>k!==primary);const newH=state.history.map(g=>({...g,players:g.players.map(p=>{if(others.includes(pkey(p)))return{...p,userId:diagPlayers[primary].userId||undefined};return p})}));dispatch({type:"SYNC_HISTORY",history:newH});if(state.family&&sb){if(USE_NEW_DB){const fam=await db2.getFamilyByCode(state.family);if(fam)await db2.saveAllGames(fam.id,newH)}else{await dbSave(state.family,newH)}}}  async function joinFamily(){if(!pw.trim())return;setLoading(true);setMsg("");const code=pw.trim().toLowerCase().replace(/\s+/g,"-");
+    if(USE_NEW_DB){
+      const fam=await db2.getOrCreateFamily(code);
+      if(!fam){setMsg("Error");setLoading(false);return}
+      dispatch({type:"JOIN_FAMILY",family:code});
+      // Register self as member
+      if(state.user&&!state.user.guest){
+        const u=await db2.getUser(state.user.userId);
+        if(u)await db2.joinFamily(u.id,fam.id,state.user.displayName||state.user.userId);
+      }
+      // Load family data
+      const[games,tplRows,members]=await Promise.all([db2.getGames(fam.id),db2.getTemplates(fam.id),db2.getFamilyMembers(fam.id)]);
+      if(games.length)dispatch({type:"SYNC_HISTORY",history:games});
+      const tplObj={};tplRows.forEach(function(t){tplObj[t.template_key]={gameKey:t.game_key,name:t.name,gameName:t.name,emoji:t.emoji,categories:t.categories,scoringType:t.scoring_type,tier:t.tier,maxScore:t.max_score,lowWins:t.low_wins}});
+      if(Object.keys(tplObj).length)dispatch({type:"SYNC_TEMPLATES",templates:tplObj});
+      const fuMap={};members.forEach(function(m){const uname=m.tally_users?m.tally_users.username:null;if(uname)fuMap[uname]={displayName:m.display_name}});
+      dispatch({type:"SET_FAMILY_USERS",familyUsers:fuMap});
+    }else{
+      const games=await dbLoad(code);if(games===null)await dbSave(code,[]);
+      dispatch({type:"JOIN_FAMILY",family:code});
+      const rfu=(await dbLoad(code+"_users"))||{};
+      if(state.user&&!state.user.guest&&!rfu[state.user.userId]){rfu[state.user.userId]={displayName:state.user.displayName||state.user.userId};await dbSave(code+"_users",rfu)}
+      dispatch({type:"SET_FAMILY_USERS",familyUsers:rfu});
+      if(games)dispatch({type:"SYNC_HISTORY",history:games});
+    }
+    setMsg(`✅ Joined "${code}"`);setLoading(false);setPw("")}  async function doRename(){const n=newDname.trim();if(!n){setNameErr("Required");return}const other=Object.entries(fu).filter(([uid])=>uid!==state.user.userId).map(([,u])=>u.displayName);if(other.includes(n)){setNameErr("Name taken");return}setNameErr("");dispatch({type:"RENAME_USER",userId:state.user.userId,newName:n});
+    if(state.family&&sb){
+      const h=state.history.map(g=>({...g,players:g.players.map(p=>p.userId===state.user.userId?{...p,name:n}:p)}));
+      if(USE_NEW_DB){
+        const fam=await db2.getFamilyByCode(state.family);
+        if(fam){
+          await db2.saveAllGames(fam.id,h);
+          const u=await db2.getUser(state.user.userId);
+          if(u){await db2.updateMemberDisplayName(u.id,fam.id,n);await db2.updateUser(state.user.userId,{display_name:n})}
+        }
+      }else{
+        await dbSave(state.family,h);
+        const rfu=(await dbLoad(state.family+"_users"))||{};rfu[state.user.userId]={displayName:n};await dbSave(state.family+"_users",rfu);
+        await dbSaveUser(state.user.userId,{pin:state.user.pin,displayName:n,families:state.user.families||[],createdAt:state.user.createdAt});
+      }
+    }setEditName(false)}function startClaim(c){setClaimTarget(c);const sel={};c.games.forEach(g=>{sel[g.id]=true});setClaimSel(sel)}  async function doClaim(){if(!claimTarget||!state.user)return;const ids=Object.keys(claimSel).filter(k=>claimSel[k]).map(Number);const dn=myDname||state.user.userId;dispatch({type:"CLAIM_GAMES",gameIds:ids,oldName:claimTarget.name,userId:state.user.userId,newName:dn});
+    if(state.family&&sb){
+      const h=state.history.map(g=>{if(!ids.includes(g.id))return g;return{...g,players:g.players.map(p=>p.name===claimTarget.name&&!p.userId?{...p,userId:state.user.userId,name:dn}:p)}});
+      if(USE_NEW_DB){const fam=await db2.getFamilyByCode(state.family);if(fam)await db2.saveAllGames(fam.id,h.filter(g=>ids.includes(g.id)))}
+      else{await dbSave(state.family,h)}
+    }setClaimTarget(null)}return(<div style={{padding:"20px 20px 80px"}}><h2 style={{fontFamily:"Georgia,serif",fontWeight:900,marginBottom:16}}>👨‍👩‍👧 Family</h2>{state.user&&!state.user.guest&&<div style={{...S.card,padding:20,marginBottom:20}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}><div><div style={{fontSize:11,color:C.muted,textTransform:"uppercase",letterSpacing:2}}>Profile</div><div style={{fontSize:20,fontWeight:900,fontFamily:"Georgia,serif",marginTop:4}}>{myDname||state.user.userId}</div><div style={{fontSize:12,color:C.muted}}>@{state.user.userId}</div></div><div style={{fontSize:36}}>👤</div></div>{editName?<div><input style={{...inp,marginBottom:8}} value={newDname} onChange={e=>{setNewDname(e.target.value);setNameErr("")}}/>{nameErr&&<div style={{color:C.tomato,fontSize:12,fontWeight:700,marginBottom:8}}>{nameErr}</div>}<div style={{display:"flex",gap:8}}><Btn onClick={()=>setEditName(false)}>Cancel</Btn><Btn primary onClick={doRename}>Save</Btn></div></div>:<Btn onClick={()=>{setEditName(true);setNewDname(myDname||"")}}>✏️ Change Display Name</Btn>}<div style={{marginTop:12}}><span onClick={()=>{if(window.confirm("Log out?"))dispatch({type:"LOGOUT"})}} style={{color:"#c0392b",fontSize:13,cursor:"pointer",fontWeight:700}}>Log out</span></div></div>}{state.user?.guest&&<div style={{...S.limeCard,padding:20,marginBottom:20,textAlign:"center"}}><div style={{fontSize:32,marginBottom:8}}>👤</div><div style={{fontWeight:700,fontSize:15,marginBottom:4}}>Guest</div><p style={{color:C.muted,fontSize:12,marginBottom:12}}>Create an account to claim games & sync.</p><Btn primary onClick={()=>dispatch({type:"LOGOUT"})}>Create Account</Btn></div>}{state.user&&!state.user.guest&&state.user.families?.length>0&&<div style={{marginBottom:20}}><h3 style={{...secHead,color:C.card}}>Your Families</h3>{state.user.families.map(f=><div key={f} style={{...S.card,padding:"12px 16px",marginBottom:8,display:"flex",alignItems:"center",justifyContent:"space-between",background:f===state.family?C.lime:C.card}}><div onClick={()=>{if(f!==state.family&&!state.current)dispatch({type:"SWITCH_FAMILY",family:f})}} style={{cursor:f!==state.family?"pointer":"default",flex:1}}><span style={{fontWeight:700}}>{f}</span>{f===state.family&&<span style={{fontSize:11,color:C.muted,marginLeft:8}}>· active</span>}</div><span onClick={()=>{if(window.confirm(`Leave "${f}"?`))dispatch({type:"LEAVE_FAMILY",family:f})}} style={{color:"#c0392b",fontSize:12,cursor:"pointer",fontWeight:700}}>Leave</span></div>)}{state.current&&<p style={{color:C.card,fontSize:11}}>Finish current game to switch.</p>}</div>}<div style={{marginBottom:20}}><h3 style={{...secHead,color:C.card}}>Join / Create Family</h3>{!sb&&<div style={{...S.limeCard,padding:14,marginBottom:12,fontSize:13,color:C.muted}}>⚠️ Supabase not configured.</div>}<input style={{...inp,marginBottom:12}} placeholder="Family password" value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==="Enter"&&joinFamily()}/><Btn full primary onClick={joinFamily} disabled={loading||!pw.trim()||!sb}>{loading?"…":"Join / Create →"}</Btn>{msg&&<div style={{...S.card,marginTop:12,padding:14,fontSize:13,color:C.muted}}>{msg}</div>}</div>{state.family&&!state.user?.guest&&claimable.length>0&&<div style={{marginBottom:20}}><h3 style={{...secHead,color:C.card}}>Unclaimed Players</h3><p style={{color:C.card,fontSize:12,marginBottom:12}}>Tap to link games to your account.</p>{claimable.map(c=><div key={c.name} onClick={()=>startClaim(c)} style={{...S.card,padding:"12px 16px",marginBottom:8,cursor:"pointer",display:"flex",justifyContent:"space-between"}}><span style={{fontWeight:700}}>{c.name}</span><span style={{fontSize:12,color:C.muted}}>{c.games.length}G</span></div>)}</div>}{myDupes.length>0&&<div style={{marginBottom:20}}><div style={{...S.card,padding:16,background:"#fff3e0",borderColor:"#f39c12"}}><div style={{fontWeight:900,fontSize:14,marginBottom:6}}>🔧 Your duplicate</div><p style={{color:C.muted,fontSize:12,marginBottom:12}}>{myDupes.length} game{myDupes.length!==1?"s":""} with "{myDname}" not linked.</p><Btn full primary onClick={fixMyDupes}>Merge into my account</Btn></div></div>}{dupeNames.length>0&&<div style={{marginBottom:20}}><div style={{...S.card,padding:16,background:"#fde8e8",borderColor:"#c0392b"}}><div style={{fontWeight:900,fontSize:14,marginBottom:6}}>⚠️ Duplicates</div><p style={{color:C.muted,fontSize:12,marginBottom:12}}>Same name, different identities:</p>{dupeNames.map(([nm,keys])=><div key={nm} style={{background:C.white,border:"2px solid "+C.ink,borderRadius:10,padding:12,marginBottom:10}}><div style={{fontWeight:900,fontSize:15,marginBottom:8}}>"{nm}"</div>{keys.map(k=>{const d=diagPlayers[k];return<div key={k} style={{fontSize:12,color:C.muted,marginBottom:4,paddingLeft:8,borderLeft:"3px solid "+(d.userId?C.tomato:C.muted)}}><span style={{fontWeight:700,color:C.ink}}>{[...d.names].join(", ")}</span> · {d.userId?`@${d.userId}`:"no account"} · {d.games}G</div>})}<button onClick={()=>mergeDupe(nm,keys)} style={{marginTop:8,width:"100%",padding:"10px",fontSize:13,fontWeight:700,borderRadius:8,border:"2px solid "+C.ink,background:C.tomato,color:C.white,cursor:"pointer"}}>🔗 Merge</button></div>)}</div></div>}<div style={{marginBottom:20}}><div onClick={()=>setShowDiag(d=>!d)} style={{color:C.card,fontSize:12,cursor:"pointer",fontWeight:700}}>{showDiag?"▼":"▶"} Debug info</div>{showDiag&&<div style={{...S.card,padding:12,marginTop:8,fontSize:11,maxHeight:300,overflow:"auto"}}>{Object.entries(diagPlayers).map(([k,v])=><div key={k} style={{marginBottom:8,paddingBottom:8,borderBottom:"1px solid "+C.ink+"20"}}><div style={{fontWeight:900}}>{[...v.names].join(", ")}</div><div style={{color:C.muted}}>Key: {k} · userId: {v.userId||"none"} · {v.games}G</div></div>)}</div>}</div>{claimTarget&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:999,padding:20}} onClick={()=>setClaimTarget(null)}><div style={{...S.card,padding:24,maxWidth:380,width:"100%",maxHeight:"80vh",overflow:"auto"}} onClick={e=>e.stopPropagation()}><h3 style={{fontFamily:"Georgia,serif",marginBottom:4,fontSize:18}}>Claim "{claimTarget.name}"?</h3><p style={{color:C.muted,fontSize:12,marginBottom:16}}>Select games to link as "{myDname||state.user?.userId}".</p>{claimTarget.games.map(g=><div key={g.id} onClick={()=>setClaimSel(p=>({...p,[g.id]:!p[g.id]}))} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderBottom:"1px solid "+C.ink+"20",cursor:"pointer"}}><div style={{width:24,height:24,borderRadius:6,border:"2px solid "+C.ink,background:claimSel[g.id]?C.tomato:C.white,display:"flex",alignItems:"center",justifyContent:"center",color:C.white,fontSize:14,fontWeight:700,flexShrink:0}}>{claimSel[g.id]?"✓":""}</div><div style={{flex:1}}><div style={{fontSize:13,fontWeight:700}}>{gameEmoji(g)} {gameName(g)}</div><div style={{fontSize:11,color:C.muted}}>{new Date(g.finishedAt||g.startedAt).toLocaleDateString()}</div></div></div>)}<div style={{display:"flex",gap:10,marginTop:20}}><Btn full onClick={()=>setClaimTarget(null)}>Cancel</Btn><Btn full primary onClick={doClaim} disabled={!Object.values(claimSel).some(v=>v)}>Claim</Btn></div></div></div>}</div>);}
 
 /* ═══ Shared UI ═══ */
 function TopBar({title,onBack}){return<div style={{display:"flex",alignItems:"center",marginBottom:24,gap:12}}><button onClick={onBack} style={{background:C.card,border:"2px solid "+C.ink,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:18,fontWeight:900,boxShadow:"2px 2px 0 "+C.ink}}>←</button><h2 style={{margin:0,fontSize:20,fontFamily:"Georgia,serif",fontWeight:900}}>{title}</h2></div>}
