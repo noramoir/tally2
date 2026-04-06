@@ -263,8 +263,14 @@ function rname(p, fu) {
 }
 
 function gameName(g) {
-  return g.gameName || g.customName || (BUILT_IN_GAMES[g.gameKey] ? BUILT_IN_GAMES[g.gameKey].name : null) || "Game";
-}
+  // Priority: explicit gameName > customName > template lookup > gameKey (if not "custom") > fallback
+  if (g.gameName && g.gameName !== "Game" && g.gameName !== "Custom Game") return g.gameName;
+  if (g.customName) return g.customName;
+  if (BUILT_IN_GAMES[g.gameKey] && g.gameKey !== "custom") return BUILT_IN_GAMES[g.gameKey].name;
+  if (g.gameKey && g.gameKey !== "custom") return g.gameKey;
+  if (g.gameName) return g.gameName;
+  return "Game";
+}}
 
 function gameEmoji(g) {
   return g.emoji || (BUILT_IN_GAMES[g.gameKey] ? BUILT_IN_GAMES[g.gameKey].emoji : null) || "🎲";
