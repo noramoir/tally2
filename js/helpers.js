@@ -50,6 +50,180 @@ async function dbSave(c, g) {
 async function dbLoadUser(u) { return dbLoad("user_" + u); }
 async function dbSaveUser(u, d) { return dbSave("user_" + u, d); }
 
+// ═══ NEW DATABASE LAYER (tally_* tables) ═══
+// Set USE_NEW_DB = true once you've verified migration
+var USE_NEW_DB = false;
+
+var db2 = {
+  // ── Users ──
+  async getUser(username) {
+    if (!sb) return null;
+    try {
+      const { data } = await sb.from("tally_users").select("*").eq("username", username).single();
+      return data;
+    } catch { return null; }
+  },
+  async createUser(username, pinHash, displayName) {
+    if (!sb) return null;
+    try {
+      const { data } = await sb.from("tally_users").insert({ username, pin_hash: pinHash, display_name: displayName }).select().single();
+      return data;
+    } catch { return null; }
+  },
+  async updateUser(username, updates) {
+    if (!sb) return;
+    try { await sb.from("tally_users").update(updates).eq("username", username); } catch {}
+  },
+
+  // ── Families ──
+  async getOrCreateFamily(code) {
+    if (!sb) return null;
+    try {
+      const { data: existing } = await sb.from("tally_families").select("*").eq("code", code).single();
+      if (existing) return existing;
+      const { data } = await sb.from("tally_families").insert({ code }).select().single();
+      return data;
+    } catch {
+      try { const { data } = await sb.from("tally_families").select("*").eq("code", code).single(); return data; } catch { return null; }
+    }
+  },
+  async getFamilyByCode(code) {
+    if (!sb) return null;
+    try { const { data } = await sb.from("tally_families").select("*").eq("code", code).single(); return data; } catch { return null; }
+  },
+
+  // ── Family Members ──
+  async getFamilyMembers(familyId) {
+    if (!sb) return [];
+    try {
+      const { data } = await sb.from("tally_family_members").select("*, tally_users(username, display_name)").eq("family_id", familyId);
+      return data || [];
+    } catch { return []; }
+  },
+  async joinFamily(userId, familyId, displayName) {
+    if (!sb) return;
+    try {
+      await sb.from("tally_family_members").upsert(
+        { user_id: userId, family_id: familyId, display_name: displayName, role: "member" },
+        { onConflict: "user_id,family_id" }
+      );
+    } catch {}
+  },
+  async leaveFamily(userId, familyId) {
+    if (!sb) return;
+    try { await sb.from("tally_family_members").delete().eq("user_id", userId).eq("family_id", familyId); } catch {}
+  },
+  async updateMemberDisplayName(userId, familyId, displayName) {
+    if (!sb) return;
+    try { await sb.from("tally_family_members").update({ display_name: displayName }).eq("user_id", userId).eq("family_id", familyId); } catch {}
+  },
+  async getUserFamilies(userId) {
+    if (!sb) return [];
+    try {
+      const { data } = await sb.from("tally_family_members").select("family_id, display_name, role, tally_families(code)").eq("user_id", userId);
+      return data || [];
+    } catch { return []; }
+  },
+
+  // ── Templates ──
+  async getTemplates(familyId) {
+    if (!sb) return [];
+    try { const { data } = await sb.from("tally_templates").select("*").eq("family_id", familyId); return data || []; } catch { return []; }
+  },
+  async upsertTemplate(familyId, templateKey, template) {
+    if (!sb) return;
+    try {
+      await sb.from("tally_templates").upsert({
+        family_id: familyId,
+        template_key: templateKey,
+        name: template.name || template.gameName || templateKey,
+        emoji: template.emoji || "🎲",
+        game_key: template.gameKey || "custom",
+        categories: template.categories || [],
+        scoring_type: template.scoringType || "standard",
+        tier: template.tier || 3,
+        max_score: template.maxScore || null,
+        low_wins: template.lowWins || false,
+      }, { onConflict: "family_id,template_key" });
+    } catch {}
+  },
+  async deleteTemplate(familyId, templateKey) {
+    if (!sb) return;
+    try { await sb.from("tally_templates").delete().eq("family_id", familyId).eq("template_key", templateKey); } catch {}
+  },
+
+  // ── Games ──
+  async getGames(familyId) {
+    if (!sb) return [];
+    try {
+      const { data } = await sb.from("tally_games").select("*").eq("family_id", familyId).order("finished_at", { ascending: false, nullsFirst: false });
+      return (data || []).map(db2.gameFromRow);
+    } catch { return []; }
+  },
+  async saveGame(familyId, game) {
+    if (!sb) return;
+    try {
+      const existing = await sb.from("tally_games").select("id").eq("original_id", game.id).eq("family_id", familyId).maybeSingle();
+      if (existing?.data) {
+        await sb.from("tally_games").update(db2.gameToRow(game)).eq("id", existing.data.id);
+      } else {
+        await sb.from("tally_games").insert(Object.assign({ family_id: familyId }, db2.gameToRow(game)));
+      }
+    } catch {}
+  },
+  async deleteGame(familyId, originalId) {
+    if (!sb) return;
+    try { await sb.from("tally_games").delete().eq("original_id", originalId).eq("family_id", familyId); } catch {}
+  },
+  async saveAllGames(familyId, games) {
+    // Bulk sync: used for claims/renames that touch many games
+    if (!sb) return;
+    for (var i = 0; i < games.length; i++) {
+      await db2.saveGame(familyId, games[i]);
+    }
+  },
+
+  // ── Row Converters ──
+  gameToRow: function(g) {
+    return {
+      original_id: g.id,
+      game_name: g.gameName || "Game",
+      emoji: g.emoji || "🎲",
+      game_key: g.gameKey || "custom",
+      categories: g.categories || [],
+      players: g.players || [],
+      team_mode: g.teamMode || false,
+      teams: g.teams || null,
+      scoring_type: g.scoringType || "standard",
+      tier: g.tier || 3,
+      max_score: g.maxScore || null,
+      low_wins: g.lowWins || false,
+      finished: g.finished || false,
+      started_at: g.startedAt || null,
+      finished_at: g.finishedAt || null,
+    };
+  },
+  gameFromRow: function(r) {
+    return {
+      id: r.original_id || r.id,
+      gameName: r.game_name,
+      emoji: r.emoji,
+      gameKey: r.game_key,
+      categories: r.categories,
+      players: r.players,
+      teamMode: r.team_mode,
+      teams: r.teams,
+      scoringType: r.scoring_type,
+      tier: r.tier,
+      maxScore: r.max_score,
+      lowWins: r.low_wins,
+      finished: r.finished,
+      startedAt: r.started_at,
+      finishedAt: r.finished_at,
+    };
+  },
+};
+
 // ─── Shared Styles ───────────────────────────────
 var S = {
   card: { background: C.card, border: "2px solid " + C.ink, borderRadius: 14, boxShadow: "3px 3px 0 " + C.ink },
