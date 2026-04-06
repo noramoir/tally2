@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>🎲 Tally Admin</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/config.js"></script>
+  <style>
+    :root { --bg: #1a1a2e; --card: #16213e; --accent: #F06038; --text: #e0e0e0; --muted: #888; --border: #333; --green: #2ecc71; --red: #e74c3c; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'Courier New', monospace; min-height: 100vh; padding: 20px; }
+    h1 { color: var(--accent); margin-bottom: 8px; }
+    h2 { color: var(--accent); margin: 24px 0 12px; font-size: 16px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+    .container { max-width: 900px; margin: 0 auto; }
+    .login-box { max-width: 400px; margin: 100px auto; background: var(--card); padding: 32px; border-radius: 12px; border: 1px solid var(--border); }
+    input, select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; font-size: 14px; font-family: inherit; width: 100%; margin-bottom: 12px; }
+    button { background: var(--accent); color: white; border: none; border-radius: 6px; padding: 10px 20px; font-size: 14px; cursor: pointer; font-family: inherit; font-weight: 700; }
+    button:hover { opacity: 0.9; }
+    button.secondary { background: var(--card); border: 1px solid var(--border); color: var(--text); }
+    button.danger { background: var(--red); }
+    button.small { padding: 6px 12px; font-size: 12px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }
+    .badge-green { background: var(--green); color: #000; }
+    .badge-red { background: var(--red); color: #fff; }
+    .badge-muted { background: var(--border); color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: 13px; }
+    th { color: var(--accent); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+    .flex { display: flex; gap: 8px; align-items: center; }
+    .flex-between { display: flex; justify-content: space-between; align-items: center; }
+    .tabs { display: flex; gap: 4px; margin-bottom: 20px; }
+    .tab { padding: 8px 16px; border-radius: 6px 6px 0 0; cursor: pointer; font-weight: 700; font-size: 13px; border: 1px solid var(--border); border-bottom: none; }
+    .tab-active { background: var(--card); color: var(--accent); }
+    .tab-inactive { background: var(--bg); color: var(--muted); }
+    .status { padding: 8px 12px; border-radius: 6px; margin-bottom: 16px; font-size: 13px; }
+    .status-ok { background: #1a3a2a; color: var(--green); border: 1px solid var(--green); }
+    .status-err { background: #3a1a1a; color: var(--red); border: 1px solid var(--red); }
+    .json-editor { width: 100%; min-height: 200px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 12px; font-size: 12px; font-family: inherit; resize: vertical; }
+    .mt-8 { margin-top: 8px; }
+    .mt-16 { margin-top: 16px; }
+    .mb-8 { margin-bottom: 8px; }
+    .text-muted { color: var(--muted); font-size: 12px; }
+  </style>
+</head>
+<body>
+<div class="container" id="app"></div>
+<script>
+// ─── Admin Config ────────────────────────────────
+// Set your admin password here (plain text for now, only you access this page)
+const ADMIN_PASSWORD = "admin123"; // CHANGE THIS!
+
+// ─── Supabase ────────────────────────────────────
+let sb = null;
+try { sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON); } catch(e) {}
+
+async function dbLoad(c) { if (!sb) return null; try { const { data } = await sb.from("family_games").select("games").eq("family_code", c).single(); return data?.games || null; } catch { return null; } }
+async function dbSave(c, g) { if (!sb) return; try { await sb.from("family_games").upsert({ family_code: c, games: g, updated_at: new Date().toISOString() }, { onConflict: "family_code" }); } catch {} }
+async function dbListAll() { if (!sb) return []; try { const { data } = await sb.from("family_games").select("family_code,games,updated_at").order("updated_at", { ascending: false }); return data || []; } catch { return []; } }
+
+// ─── State ───────────────────────────────────────
+let loggedIn = false;
+let allData = [];
+let tab = "overview";
+let status = null;
+let editingKey = null;
+let editJson = "";
+
+// ─── Render ──────────────────────────────────────
+function render() {
+  const app = document.getElementById("app");
+  if (!loggedIn) {
+    app.innerHTML = `
+      <div class="login-box">
+        <h1>🎲 Tally Admin</h1>
+        <p class="text-muted mb-8">Enter admin password to continue.</p>
+        <input type="password" id="pw" placeholder="Admin password" onkeydown="if(event.key==='Enter')doLogin()"/>
+        <button onclick="doLogin()" style="width:100%">Log In →</button>
+        <div id="login-err" style="color:var(--red);font-size:13px;margin-top:8px"></div>
+      </div>
+    `;
+    return;
+  }
+
+  const users = allData.filter(r => r.family_code.startsWith("user_"));
+  const families = allData.filter(r => !r.family_code.startsWith("user_") && !r.family_code.includes("_templates") && !r.family_code.includes("_users"));
+  const templates = allData.filter(r => r.family_code.endsWith("_templates"));
+  const familyUsers = allData.filter(r => r.family_code.endsWith("_users") && !r.family_code.startsWith("user_"));
+
+  let content = "";
+  const statusHtml = status ? `<div class="status ${status.ok ? 'status-ok' : 'status-err'}">${status.msg}</div>` : "";
+
+  if (tab === "overview") {
+    content = `
+      ${statusHtml}
+      <div class="card">
+        <div class="flex-between"><span>Total records in database</span><span style="font-size:24px;font-weight:900;color:var(--accent)">${allData.length}</span></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div class="card"><div style="font-size:24px;font-weight:900;color:var(--accent)">${users.length}</div><div class="text-muted">User Accounts</div></div>
+        <div class="card"><div style="font-size:24px;font-weight:900;color:var(--accent)">${families.length}</div><div class="text-muted">Family Spaces</div></div>
+        <div class="card"><div style="font-size:24px;font-weight:900;color:var(--accent)">${templates.length}</div><div class="text-muted">Template Sets</div></div>
+        <div class="card"><div style="font-size:24px;font-weight:900;color:var(--accent)">${familyUsers.length}</div><div class="text-muted">Family User Maps</div></div>
+      </div>
+    `;
+  }
+
+  else if (tab === "users") {
+    let rows = users.map(u => {
+      const d = u.games || {};
+      const uid = u.family_code.replace("user_", "");
+      const pinStatus = d.pin ? (d.pin.length === 64 ? '<span class="badge badge-green">hashed</span>' : '<span class="badge badge-red">plain</span>') : '<span class="badge badge-muted">none</span>';
+      const fams = (d.families || []).join(", ") || "—";
+      return `<tr>
+        <td><strong>${uid}</strong></td>
+        <td>${d.displayName || uid}</td>
+        <td>${pinStatus}</td>
+        <td style="font-size:11px">${fams}</td>
+        <td>${d.createdAt ? new Date(d.createdAt).toLocaleDateString() : "—"}</td>
+        <td><button class="small secondary" onclick="editRecord('${u.family_code}')">Edit</button></td>
+      </tr>`;
+    }).join("");
+    content = `
+      ${statusHtml}
+      <p class="text-muted mb-8">${users.length} registered users</p>
+      <table><thead><tr><th>Username</th><th>Display</th><th>PIN</th><th>Families</th><th>Created</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+    `;
+  }
+
+  else if (tab === "families") {
+    let rows = families.map(f => {
+      const games = Array.isArray(f.games) ? f.games : [];
+      const finished = games.filter(g => g.finished).length;
+      return `<tr>
+        <td><strong>${f.family_code}</strong></td>
+        <td>${games.length} total / ${finished} finished</td>
+        <td style="font-size:11px">${f.updated_at ? new Date(f.updated_at).toLocaleDateString() : "—"}</td>
+        <td>
+          <button class="small secondary" onclick="editRecord('${f.family_code}')">Edit</button>
+          <button class="small secondary" onclick="viewGames('${f.family_code}')">Games</button>
+        </td>
+      </tr>`;
+    }).join("");
+    content = `
+      ${statusHtml}
+      <p class="text-muted mb-8">${families.length} family spaces</p>
+      <table><thead><tr><th>Family Code</th><th>Games</th><th>Updated</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+    `;
+  }
+
+  else if (tab === "templates") {
+    let rows = templates.map(t => {
+      const d = t.games || {};
+      const count = Object.keys(d).length;
+      const names = Object.values(d).map(v => `${v.emoji || "🎲"} ${v.name || v.gameName || "?"}`).join(", ");
+      return `<tr>
+        <td><strong>${t.family_code.replace("_templates","")}</strong></td>
+        <td>${count} games</td>
+        <td style="font-size:11px;max-width:300px;overflow:hidden;text-overflow:ellipsis">${names}</td>
+        <td><button class="small secondary" onclick="editRecord('${t.family_code}')">Edit</button></td>
+      </tr>`;
+    }).join("");
+    content = `
+      ${statusHtml}
+      <p class="text-muted mb-8">${templates.length} template sets. Edit to change tiers, categories, game names.</p>
+      <table><thead><tr><th>Family</th><th>Count</th><th>Games</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+    `;
+  }
+
+  else if (tab === "editor") {
+    content = `
+      ${statusHtml}
+      <div class="flex-between mb-8">
+        <div><strong>Editing:</strong> <code>${editingKey}</code></div>
+        <div class="flex"><button class="small" onclick="saveEdit()">💾 Save</button><button class="small secondary" onclick="tab='overview';render()">Cancel</button></div>
+      </div>
+      <textarea class="json-editor" id="json-edit">${editJson}</textarea>
+      <p class="text-muted mt-8">⚠️ Be careful with JSON formatting. Invalid JSON won't save.</p>
+    `;
+  }
+
+  else if (tab === "games") {
+    const fam = editingKey;
+    const record = allData.find(r => r.family_code === fam);
+    const games = Array.isArray(record?.games) ? record.games : [];
+    let rows = games.map((g, i) => {
+      const winner = g.players ? [...g.players].sort((a,b) => {
+        const at = Object.values(a.scores||{}).reduce((s,v) => s+(parseFloat(v)||0), 0);
+        const bt = Object.values(b.scores||{}).reduce((s,v) => s+(parseFloat(v)||0), 0);
+        return g.lowWins ? at-bt : bt-at;
+      })[0] : null;
+      const wName = winner ? winner.name : "?";
+      return `<tr>
+        <td>${g.emoji || "🎲"} ${g.gameName || "Game"}</td>
+        <td>${g.finished ? '<span class="badge badge-green">done</span>' : '<span class="badge badge-muted">active</span>'}</td>
+        <td>${wName}</td>
+        <td>${g.players ? g.players.map(p=>p.name).join(", ") : "—"}</td>
+        <td style="font-size:11px">${g.finishedAt ? new Date(g.finishedAt).toLocaleDateString() : "—"}</td>
+        <td>T${g.tier || 3}</td>
+        <td><button class="small danger" onclick="deleteGame('${fam}',${g.id})">🗑</button></td>
+      </tr>`;
+    }).join("");
+    content = `
+      ${statusHtml}
+      <div class="flex-between mb-8">
+        <div><strong>${fam}</strong> — ${games.length} games</div>
+        <button class="small secondary" onclick="tab='families';render()">← Back</button>
+      </div>
+      <table><thead><tr><th>Game</th><th>Status</th><th>Winner</th><th>Players</th><th>Date</th><th>Tier</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+    `;
+  }
+
+  app.innerHTML = `
+    <div class="flex-between" style="margin-bottom:20px">
+      <h1>🎲 Tally Admin</h1>
+      <div class="flex"><button class="small secondary" onclick="refreshData()">🔄 Refresh</button><button class="small secondary" onclick="loggedIn=false;render()">Logout</button></div>
+    </div>
+    <div class="tabs">
+      ${["overview","users","families","templates"].map(t =>
+        `<div class="tab ${tab===t?'tab-active':'tab-inactive'}" onclick="tab='${t}';render()">${t.charAt(0).toUpperCase()+t.slice(1)}</div>`
+      ).join("")}
+    </div>
+    ${content}
+  `;
+}
+
+// ─── Actions ─────────────────────────────────────
+function doLogin() {
+  const pw = document.getElementById("pw").value;
+  if (pw === ADMIN_PASSWORD) {
+    loggedIn = true;
+    refreshData();
+  } else {
+    document.getElementById("login-err").textContent = "Wrong password";
+  }
+}
+
+async function refreshData() {
+  status = { ok: true, msg: "Loading…" };
+  render();
+  allData = await dbListAll();
+  status = { ok: true, msg: `Loaded ${allData.length} records` };
+  render();
+  setTimeout(() => { status = null; render(); }, 2000);
+}
+
+function editRecord(key) {
+  const record = allData.find(r => r.family_code === key);
+  editingKey = key;
+  editJson = JSON.stringify(record?.games || {}, null, 2);
+  tab = "editor";
+  render();
+}
+
+async function saveEdit() {
+  const textarea = document.getElementById("json-edit");
+  try {
+    const parsed = JSON.parse(textarea.value);
+    await dbSave(editingKey, parsed);
+    status = { ok: true, msg: `✅ Saved "${editingKey}"` };
+    tab = "overview";
+    await refreshData();
+  } catch(e) {
+    status = { ok: false, msg: `❌ Invalid JSON: ${e.message}` };
+    render();
+  }
+}
+
+function viewGames(familyCode) {
+  editingKey = familyCode;
+  tab = "games";
+  render();
+}
+
+async function deleteGame(familyCode, gameId) {
+  if (!confirm("Delete this game from history? This can't be undone.")) return;
+  const record = allData.find(r => r.family_code === familyCode);
+  if (!record || !Array.isArray(record.games)) return;
+  const updated = record.games.filter(g => g.id !== gameId);
+  await dbSave(familyCode, updated);
+  status = { ok: true, msg: "Game deleted" };
+  await refreshData();
+  editingKey = familyCode;
+  tab = "games";
+  render();
+}
+
+// ─── Init ────────────────────────────────────────
+render();
+</script>
+</body>
+</html>
