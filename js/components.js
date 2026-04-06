@@ -256,7 +256,9 @@ function SetupScreen({state,dispatch}){
   const lastPlayed={};state.history.forEach(g=>{const k=g.gameKey==="custom"?gameName(g):g.gameKey;if(!lastPlayed[k])lastPlayed[k]=g.finishedAt||g.startedAt});
   const allGames={...BUILT_IN_GAMES};Object.entries(state.templates||{}).forEach(([k,t])=>{allGames[k]={...t,name:t.name||t.gameName||k}});
   const gameList=Object.entries(allGames).sort(([ka],[kb])=>{const ta=lastPlayed[ka]||null,tb=lastPlayed[kb]||null;if(ta&&tb)return new Date(tb)-new Date(ta);if(ta)return -1;if(tb)return 1;return 0});
-  const knownPlayers=[...new Set(state.history.flatMap(g=>{if(g.teams)return g.teams.flatMap(t=>t.members);return g.players.map(p=>rname(p,fu))}))];
+  const knownPlayersRaw=state.history.flatMap(g=>{if(g.teams)return g.teams.flatMap(t=>t.members);return g.players.map(p=>rname(p,fu))});
+  const knownPlayersSeen={};const knownPlayers=[];
+    knownPlayersRaw.forEach(function(n){const key=n.trim().toLowerCase();if(!knownPlayersSeen[key]){knownPlayersSeen[key]=n;knownPlayers.push(n)}});
   const freq=getFreqPlayers(state.history,state.user?.userId,5);
   const allPool=[...new Set([...(myName?[myName]:[]),...freq,...knownPlayers,...teams.flatMap(t=>t.members),...solo])];
   const selectedDef=gameKey?allGames[gameKey]:null;const isIndependent=gameKey==="custom"?scoringType==="independent":selectedDef?.scoringType==="independent";
