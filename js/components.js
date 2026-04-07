@@ -260,8 +260,9 @@ function SetupScreen({state,dispatch}){
   const knownPlayersSeen={};const knownPlayers=[];
     knownPlayersRaw.forEach(function(n){const key=n.trim().toLowerCase();if(!knownPlayersSeen[key]){knownPlayersSeen[key]=n;knownPlayers.push(n)}});
   const freq=getFreqPlayers(state.history,state.user?.userId,5);
-  const allPool=[...new Set([...(myName?[myName]:[]),...freq,...knownPlayers,...teams.flatMap(t=>t.members),...solo])];
-  const selectedDef=gameKey?allGames[gameKey]:null;const isIndependent=gameKey==="custom"?scoringType==="independent":selectedDef?.scoringType==="independent";
+  const allPoolRaw=[...(myName?[myName]:[]),...freq,...knownPlayers,...teams.flatMap(t=>t.members),...solo];
+  const allPoolSeen={};const allPool=[];
+  allPoolRaw.forEach(function(n){const key=n.trim().toLowerCase();if(!allPoolSeen[key]){allPoolSeen[key]=n;allPool.push(n)}});  const selectedDef=gameKey?allGames[gameKey]:null;const isIndependent=gameKey==="custom"?scoringType==="independent":selectedDef?.scoringType==="independent";
   function pickGame(k){if(pc.current)return;setGameKey(k);const def=allGames[k];setCats(k!=="custom"&&def?.categories&&def.scoringType!=="independent"?def.categories:[""]);setCustEmoji(def?.emoji||"🎲");if(k!=="custom"&&def?.scoringType)setScoringType(def.scoringType);if(k!=="custom"&&def?.maxScore)setMaxScoreInput(String(def.maxScore));setLowWins(!!(def?.lowWins))}
   function toggleSolo(n){setSolo(p=>p.includes(n)?p.filter(x=>x!==n):[...p,n])}
   function assignTeam(name,ti){setTeams(prev=>prev.map((t,i)=>{if(i===ti)return t.members.includes(name)?{...t,members:t.members.filter(m=>m!==name)}:{...t,members:[...t.members,name]};return{...t,members:t.members.filter(m=>m!==name)}}))}
