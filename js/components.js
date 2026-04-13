@@ -15,8 +15,34 @@ function App() {
   const [timerRepeat, setTimerRepeat] = useState(false);
   const [timerSound, setTimerSound] = useState("beep");
 
-  useEffect(() => { try { const s = JSON.parse(localStorage.getItem("bgs_v3") || "null"); if (s) dispatch({ type: "HYDRATE", payload: s }); } catch {} }, []);
-  useEffect(() => { localStorage.setItem("bgs_v3", JSON.stringify({ user: state.user, family: state.family, familyUsers: state.familyUsers, history: state.history, templates: state.templates, current: state.current })); }, [state.user, state.family, state.familyUsers, state.history, state.templates, state.current]);
+  useEffect(() => {
+  // Load only login info from localStorage (lightweight — just who you are)
+  localStorage.removeItem("bgs_v3"); // Clean up old cache from all devices
+    try {
+    const s = JSON.parse(localStorage.getItem("bgs_login") || "null");
+    if (s && s.userId) {
+      // Re-fetch full user data from Supabase
+      (async () => {
+        const u = await db2.getUser(s.userId);
+        if (!u) { localStorage.removeItem("bgs_login"); return; }
+        const memberRows = await db2.getUserFamilies(u.id);
+        const fams = memberRows.map(function(m) { return m.tally_families ? m.tally_families.code : null; }).filter(Boolean);
+        const user = { userId: u.username, displayName: u.display_name, pin: u.pin_hash, families: fams, createdAt: u.created_at };
+        dispatch({ type: "SET_USER", user: user });
+        if (fams.length > 0) dispatch({ type: "JOIN_FAMILY", family: s.family || fams[0] });
+      })();
+    }
+  } catch {}
+}, []);
+
+useEffect(() => {
+  // Only persist login identity — everything else comes from Supabase
+  if (state.user && !state.user.guest) {
+    localStorage.setItem("bgs_login", JSON.stringify({ userId: state.user.userId, family: state.family }));
+  } else {
+    localStorage.removeItem("bgs_login");
+  }
+}, [state.user, state.family]);
 
   // Sync family data
   useEffect(() => {
