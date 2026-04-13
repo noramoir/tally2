@@ -82,22 +82,6 @@ useEffect(() => {
     })();
   }, [state.family, state.screen]);
 
-  // Sync templates
-  useEffect(() => {
-    if (!state.family || !sb || !Object.keys(state.templates).length) return;
-    if (USE_NEW_DB) {
-      (async () => {
-        const fam = await db2.getFamilyByCode(state.family);
-        if (!fam) return;
-        for (const [key, tpl] of Object.entries(state.templates)) {
-          await db2.upsertTemplate(fam.id, key, tpl);
-        }
-      })();
-    } else {
-      dbSave(state.family + "_templates", state.templates).catch(() => {});
-    }
-  }, [state.templates, state.family]);
-
   // Sync familyUsers
   useEffect(() => {
     if (!state.family || !sb || !Object.keys(state.familyUsers).length) return;
