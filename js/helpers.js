@@ -144,6 +144,7 @@ var db2 = {
         tier: template.tier || 3,
         max_score: template.maxScore || null,
         low_wins: template.lowWins || false,
+        description: template.description || null,
       }, { onConflict: "family_id,template_key" });
     } catch {}
   },

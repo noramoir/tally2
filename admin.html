@@ -257,6 +257,10 @@ function render() {
                 Lowest score wins
               </label>
             </div>
+            <div class="form-group">
+              <label class="form-label">How to play <span style="color:var(--muted);font-style:italic">(shown in-game)</span></label>
+              <textarea id="edit-description" style="width:100%;min-height:80px;resize:vertical;margin-bottom:0" placeholder="Describe how scoring works for this game…">${(t.description||'').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</textarea>
+            </div>
             <div class="flex-between" style="margin-top:8px">
               <button onclick="saveTemplateEdit()">💾 Save Changes</button>
               <button class="small danger" onclick="deleteTemplate('${safeId}','${safeName}')">🗑 Delete</button>
@@ -809,17 +813,19 @@ async function saveTemplateEdit() {
   const name = (document.getElementById("edit-name")?.value || "").trim();
   const emoji = (document.getElementById("edit-emoji")?.value || "").trim();
   const low_wins = document.getElementById("edit-low-wins")?.checked || false;
+  const description = (document.getElementById("edit-description")?.value || "").trim() || null;
   const categories = editingTemplate.categories;
   editingTemplate.name = name;
   editingTemplate.emoji = emoji;
   editingTemplate.low_wins = low_wins;
+  editingTemplate.description = description;
   if (!name) { status = { ok: false, msg: "❌ Name is required" }; render(); return; }
   const { error } = await sb.from("tally_templates")
-    .update({ name, emoji, categories, low_wins })
+    .update({ name, emoji, categories, low_wins, description })
     .eq("id", editingTemplate.id);
   if (error) { status = { ok: false, msg: "❌ " + error.message }; render(); return; }
   const idx = templatesList.findIndex(t => t.id === editingTemplate.id);
-  if (idx !== -1) templatesList[idx] = Object.assign({}, templatesList[idx], { name, emoji, categories, low_wins });
+  if (idx !== -1) templatesList[idx] = Object.assign({}, templatesList[idx], { name, emoji, categories, low_wins, description });
   editingTemplate = null;
   editNewCategory = "";
   status = { ok: true, msg: `✅ "${name}" saved` };
