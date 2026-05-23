@@ -30,7 +30,7 @@
     th { color: var(--accent); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
     .flex { display: flex; gap: 8px; align-items: center; }
     .flex-between { display: flex; justify-content: space-between; align-items: center; }
-    .tabs { display: flex; gap: 4px; margin-bottom: 20px; }
+    .tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 20px; }
     .tab { padding: 8px 16px; border-radius: 6px 6px 0 0; cursor: pointer; font-weight: 700; font-size: 13px; border: 1px solid var(--border); border-bottom: none; }
     .tab-active { background: var(--card); color: var(--accent); }
     .tab-inactive { background: var(--bg); color: var(--muted); }
@@ -50,6 +50,13 @@
     input[type=range].calc-slider { -webkit-appearance: none; appearance: none; width: 100%; height: 6px; border-radius: 3px; background: var(--border); outline: none; padding: 0; margin: 6px 0 0; cursor: pointer; }
     input[type=range].calc-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); cursor: pointer; }
     input[type=range].calc-slider::-moz-range-thumb { width: 20px; height: 20px; border-radius: 50%; background: var(--accent); border: none; cursor: pointer; }
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.75); display: flex; align-items: center; justify-content: center; z-index: 100; }
+    .modal { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 520px; max-width: 95vw; max-height: 90vh; overflow-y: auto; }
+    .chip { display: inline-flex; align-items: center; gap: 4px; background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 3px 10px; font-size: 12px; margin: 2px; }
+    .chip-remove { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0 2px; font-size: 16px; font-weight: bold; line-height: 1; }
+    .chip-remove:hover { color: var(--red); }
+    .form-label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+    .form-group { margin-bottom: 14px; }
   </style>
 </head>
 <body>
@@ -89,6 +96,10 @@ let weightsExpanded = {};  // `${familyId}:${templateKey}` -> bool
 let calcScores = { sc: 5, sd: 5, cp: 5, lm: 5, du: 5 };
 let feedbackData = [];
 let feedbackLoaded = false;
+let templatesList = [];     // [{...template, tally_families:{code}}]
+let templatesLoaded = false;
+let editingTemplate = null; // template being edited in modal
+let editNewCategory = "";   // staging value for the add-category input
 
 // ─── Render ──────────────────────────────────────
 function render() {
@@ -176,22 +187,84 @@ function render() {
   }
 
   else if (tab === "templates") {
-    let rows = templates.map(t => {
-      const d = t.games || {};
-      const count = Object.keys(d).length;
-      const names = Object.values(d).map(v => `${v.emoji || "🎲"} ${v.name || v.gameName || "?"}`).join(", ");
-      return `<tr>
-        <td><strong>${t.family_code.replace("_templates","")}</strong></td>
-        <td>${count} games</td>
-        <td style="font-size:11px;max-width:300px;overflow:hidden;text-overflow:ellipsis">${names}</td>
-        <td><button class="small secondary" onclick="editRecord('${t.family_code}')">Edit</button></td>
-      </tr>`;
-    }).join("");
-    content = `
-      ${statusHtml}
-      <p class="text-muted mb-8">${templates.length} template sets. Edit to change tiers, categories, game names.</p>
-      <table><thead><tr><th>Family</th><th>Count</th><th>Games</th><th></th></tr></thead><tbody>${rows}</tbody></table>
-    `;
+    if (!templatesLoaded) {
+      content = `
+        ${statusHtml}
+        <div class="card">
+          <p class="text-muted mb-8">All game templates across all families. Edit to change name, emoji, scoring categories, or low-wins setting. Changes only affect future games.</p>
+          <button class="small" onclick="loadTemplates()">🔍 Load Templates</button>
+        </div>
+      `;
+    } else {
+      const rows = templatesList.map(t => {
+        const cats = Array.isArray(t.categories) ? t.categories : [];
+        const safeId = String(t.id);
+        const safeName = (t.name || "").replace(/'/g, "\\'");
+        return `<tr>
+          <td><code style="font-size:11px">${t.tally_families?.code || "?"}</code></td>
+          <td style="font-size:18px">${t.emoji || "🎲"}</td>
+          <td><strong>${t.name}</strong></td>
+          <td><code style="font-size:11px;color:var(--muted)">${t.template_key}</code></td>
+          <td style="font-size:12px;max-width:200px">${cats.length ? cats.join(", ") : '<span class="text-muted">—</span>'}</td>
+          <td>${t.low_wins ? '<span class="badge badge-muted">low wins</span>' : '—'}</td>
+          <td style="white-space:nowrap">
+            <button class="small secondary" onclick="openTemplateEdit('${safeId}')">Edit</button>
+            <button class="small danger" style="margin-left:4px" onclick="deleteTemplate('${safeId}','${safeName}')">Delete</button>
+          </td>
+        </tr>`;
+      }).join("");
+      content = `
+        ${statusHtml}
+        <p class="text-muted mb-8">${templatesList.length} templates. Name, emoji, categories, and low-wins only affect future games.</p>
+        <table><thead><tr><th>Family</th><th></th><th>Name</th><th>Key</th><th>Categories</th><th>Low Wins</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+      `;
+    }
+    if (editingTemplate) {
+      const t = editingTemplate;
+      const cats = Array.isArray(t.categories) ? t.categories : [];
+      const chipsHtml = cats.map((c, i) =>
+        `<span class="chip">${c}<button class="chip-remove" onclick="removeEditCategory(${i})">×</button></span>`
+      ).join("");
+      const safeId = String(t.id);
+      const safeName = (t.name || "").replace(/'/g, "\\'");
+      content += `
+        <div class="modal-overlay" onclick="if(event.target===this)closeTemplateModal()">
+          <div class="modal">
+            <div class="flex-between" style="margin-bottom:20px">
+              <strong style="font-size:16px">Edit Template</strong>
+              <button class="small secondary" onclick="closeTemplateModal()">✕ Cancel</button>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Name</label>
+              <input id="edit-name" value="${(t.name||'').replace(/"/g,'&quot;')}" placeholder="Template name" style="margin-bottom:0"/>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Emoji</label>
+              <input id="edit-emoji" value="${(t.emoji||'').replace(/"/g,'&quot;')}" placeholder="🎲" style="margin-bottom:0;max-width:90px"/>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Scoring Categories <span style="color:var(--muted);font-style:italic">(only affects future games)</span></label>
+              <div id="category-chips" style="min-height:28px;margin-bottom:8px">${chipsHtml}</div>
+              <div class="flex">
+                <input id="new-category" value="${editNewCategory.replace(/"/g,'&quot;')}" placeholder="Add category…" style="margin-bottom:0;flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();addEditCategory()}"/>
+                <button class="small secondary" style="margin-left:8px;white-space:nowrap" onclick="addEditCategory()">+ Add</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Low Wins <span style="color:var(--muted);font-style:italic">(only affects future games)</span></label>
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px">
+                <input type="checkbox" id="edit-low-wins" ${t.low_wins ? 'checked' : ''} style="width:auto;margin-bottom:0;cursor:pointer"/>
+                Lowest score wins
+              </label>
+            </div>
+            <div class="flex-between" style="margin-top:8px">
+              <button onclick="saveTemplateEdit()">💾 Save Changes</button>
+              <button class="small danger" onclick="deleteTemplate('${safeId}','${safeName}')">🗑 Delete</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
   }
 
   else if (tab === "newdb") {
@@ -660,6 +733,110 @@ async function applyTemplateTierToGames(familyId, templateKey, tier, familyCode)
     status = { ok: true, msg: `✅ ${familyCode} / ${templateKey} → ${games.length} games set to T${tier}` };
     setTimeout(() => { status = null; render(); }, 3000);
   }
+  render();
+}
+
+// ─── Templates Tab ───────────────────────────────
+async function loadTemplates() {
+  status = { ok: true, msg: "Loading templates…" };
+  render();
+  if (!sb) { status = { ok: false, msg: "❌ Supabase not configured" }; render(); return; }
+  try {
+    const { data, error } = await sb.from("tally_templates")
+      .select("*, tally_families(code)")
+      .order("name", { ascending: true });
+    if (error) throw error;
+    templatesList = data || [];
+  } catch(e) {
+    status = { ok: false, msg: "❌ " + e.message };
+    render();
+    return;
+  }
+  templatesLoaded = true;
+  status = null;
+  render();
+}
+
+function openTemplateEdit(id) {
+  const t = templatesList.find(t => t.id === Number(id));
+  if (!t) return;
+  editingTemplate = Object.assign({}, t, { categories: Array.isArray(t.categories) ? [...t.categories] : [] });
+  editNewCategory = "";
+  render();
+}
+
+function closeTemplateModal() {
+  editingTemplate = null;
+  editNewCategory = "";
+  render();
+}
+
+function addEditCategory() {
+  const input = document.getElementById("new-category");
+  const val = (input ? input.value : "").trim();
+  if (!val) return;
+  editingTemplate.categories.push(val);
+  editNewCategory = "";
+  const chipsEl = document.getElementById("category-chips");
+  if (chipsEl && input) {
+    const cats = editingTemplate.categories;
+    chipsEl.innerHTML = cats.map((c, i) =>
+      `<span class="chip">${c}<button class="chip-remove" onclick="removeEditCategory(${i})">×</button></span>`
+    ).join("");
+    input.value = "";
+    input.focus();
+  } else {
+    render();
+  }
+}
+
+function removeEditCategory(index) {
+  if (!editingTemplate) return;
+  editingTemplate.categories.splice(index, 1);
+  const chipsEl = document.getElementById("category-chips");
+  if (chipsEl) {
+    const cats = editingTemplate.categories;
+    chipsEl.innerHTML = cats.map((c, i) =>
+      `<span class="chip">${c}<button class="chip-remove" onclick="removeEditCategory(${i})">×</button></span>`
+    ).join("");
+  } else {
+    render();
+  }
+}
+
+async function saveTemplateEdit() {
+  if (!editingTemplate || !sb) return;
+  const name = (document.getElementById("edit-name")?.value || "").trim();
+  const emoji = (document.getElementById("edit-emoji")?.value || "").trim();
+  const low_wins = document.getElementById("edit-low-wins")?.checked || false;
+  const categories = editingTemplate.categories;
+  editingTemplate.name = name;
+  editingTemplate.emoji = emoji;
+  editingTemplate.low_wins = low_wins;
+  if (!name) { status = { ok: false, msg: "❌ Name is required" }; render(); return; }
+  const { error } = await sb.from("tally_templates")
+    .update({ name, emoji, categories, low_wins })
+    .eq("id", editingTemplate.id);
+  if (error) { status = { ok: false, msg: "❌ " + error.message }; render(); return; }
+  const idx = templatesList.findIndex(t => t.id === editingTemplate.id);
+  if (idx !== -1) templatesList[idx] = Object.assign({}, templatesList[idx], { name, emoji, categories, low_wins });
+  editingTemplate = null;
+  editNewCategory = "";
+  status = { ok: true, msg: `✅ "${name}" saved` };
+  setTimeout(() => { status = null; render(); }, 2000);
+  render();
+}
+
+async function deleteTemplate(id, name) {
+  if (!confirm(`Delete template "${name}"? This cannot be undone. Past games are not affected.`)) return;
+  if (!sb) return;
+  const numId = Number(id);
+  const { error } = await sb.from("tally_templates").delete().eq("id", numId);
+  if (error) { status = { ok: false, msg: "❌ " + error.message }; render(); return; }
+  templatesList = templatesList.filter(t => t.id !== numId);
+  if (editingTemplate?.id === numId) { editingTemplate = null; editNewCategory = ""; }
+  status = { ok: true, msg: `✅ "${name}" deleted` };
+  setTimeout(() => { status = null; render(); }, 2000);
   render();
 }
 
