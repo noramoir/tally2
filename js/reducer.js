@@ -86,6 +86,7 @@ function reducer(state, action) {
 
     case "START_GAME": {
       var g = newGame(action.gameKey, action.players, action.cats, action.customName, action.customEmoji, action.teamMode, action.teams, action.scoringType, action.maxScore, state.user, state.familyUsers, action.lowWins);
+      g = Object.assign({}, g, { description: action.description || null });
       var templates = Object.assign({}, state.templates);
       var tKey = action.gameKey === "custom" ? (action.customName || "Custom Game") : action.gameKey;
       // Preserve manually-set tier from stored template instead of using the config default
@@ -96,7 +97,7 @@ function reducer(state, action) {
         templates[tKey] = {
           gameKey: action.gameKey, name: g.gameName, gameName: g.gameName, emoji: g.emoji,
           categories: g.categories, scoringType: g.scoringType, maxScore: g.maxScore,
-          lowWins: g.lowWins, tier: g.tier,
+          lowWins: g.lowWins, tier: g.tier, description: action.description || null,
         };
       }
       return Object.assign({}, state, { screen: "game", current: g, templates: templates });
